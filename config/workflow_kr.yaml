@@ -1,0 +1,137 @@
+# ═══════════════════════════════════════════════════════════════
+# qlib 백테스팅 설정 - 한국 주식 (KOSPI 상위 100)
+# 실행: qrun config/workflow_kr.yaml
+# ═══════════════════════════════════════════════════════════════
+
+qlib_init:
+  provider_uri: "~/.qlib/qlib_data/kr_data"
+  region: cn                          # 커스텀 KR 데이터는 cn 설정 재사용
+
+market: &market kospi100              # instruments 이름
+
+# ── 데이터 설정 ───────────────────────────────────────────────
+data_handler_config: &data_handler_config
+  start_time: "2020-01-01"
+  end_time: "2024-12-31"
+  fit_start_time: "2020-01-01"
+  fit_end_time: "2022-12-31"
+  instruments: *market
+
+  # 정규화 전처리
+  infer_processors:
+    - class: RobustZScoreNorm
+      module_path: qlib.data.dataset.processor
+      kwargs:
+        fields_group: feature
+        clip_outlier: true
+    - class: Fillna
+      module_path: qlib.data.dataset.processor
+      kwargs:
+        fields_group: feature
+
+  # 학습 전처리
+  learn_processors:
+    - class: DropnaLabel
+      module_path: qlib.data.dataset.processor
+    - class: CSRankNorm
+      module_path: qlib.data.dataset.processor
+      kwargs:
+        fields_group: label
+
+  # 레이블: 5일 후 수익률 (상위 종목 예측)
+  label:
+    - "Ref($close, -5) / $close - 1"
+
+# ── 데이터셋 ──────────────────────────────────────────────────
+dataset:
+  class: DatasetH
+  module_path: qlib.data.dataset
+  kwargs:
+    handler:
+      class: Alpha158               # 158개 기술적 팩터 사용
+      module_path: qlib.contrib.data.handler
+      kwargs: *data_handler_config
+    segments:
+      train: ["2020-01-01", "2022-12-31"]
+      valid: ["2023-01-01", "2023-06-30"]
+      test:  ["2023-07-01", "2024-12-31"]
+
+# ── 모델 ──────────────────────────────────────────────────────
+model:
+  class: LGBModel
+  module_path: qlib.contrib.model.gbdt
+  kwargs:
+    loss: mse
+    colsample_bytree: 0.8879
+    learning_rate: 0.2
+    subsample: 0.8
+    lambda_l1: 205.6999
+    lambda_l2: 580.9768
+    max_depth: 8
+    num_leaves: 210
+    num_threads: 4
+    verbose: -1
+
+# ── 전략 ──────────────────────────────────────────────────────
+strategy:
+  class: TopkDropoutStrategy
+  module_path: qlib.contrib.strategy
+  kwargs:
+    signal:
+      - <MODEL>
+      - <DATASET>
+    topk: 20                         # 상위 20종목 보유
+    n_drop: 3                        # 매 리밸런싱 3종목 교체
+    hold_thresh: 1
+    only_tradable: true
+
+# ── 실행기 (거래비용 포함) ────────────────────────────────────
+executor:
+  class: SimulatorExecutor
+  module_path: qlib.backtest.executor
+  kwargs:
+    time_per_step: "day"
+    generate_portfolio_metrics: true
+    verbose: false
+
+    # ▶ 현실적인 거래비용 설정 (한국 기준)
+    exchange_kwargs:
+      freq: day
+      limit_threshold: 0.095          # 일별 상한/하한: ±9.5% 제한
+      deal_price: "close"             # 종가 기준 체결
+      open_cost: 0.001                # 매수 수수료: 0.1%
+      close_cost: 0.0015              # 매도 수수료: 0.15% (증권거래세 포함)
+      min_cost: 5                     # 최소 수수료: 5원
+
+# ── 백테스팅 ─────────────────────────────────────────────────
+backtest:
+  start_time: "2023-07-01"
+  end_time: "2024-12-31"
+  account: 10000000                   # 초기 자금: 1천만원
+  benchmark: "SH000300"               # 벤치마크 (KOSPI200에 해당)
+  exchange_kwargs:
+    freq: day
+    limit_threshold: 0.095
+    deal_price: "close"
+    open_cost: 0.001
+    close_cost: 0.0015
+    min_cost: 5
+
+# ── 실험 기록 (MLflow) ────────────────────────────────────────
+record:
+  - class: SignalRecord
+    module_path: qlib.workflow.record_temp
+    kwargs:
+      model: <MODEL>
+      dataset: <DATASET>
+  - class: SigAnaRecord
+    module_path: qlib.workflow.record_temp
+    kwargs:
+      ana_long_short: false
+      ann_scaler: 252
+  - class: PortAnaRecord
+    module_path: qlib.workflow.record_temp
+    kwargs:
+      config:
+        strategy: <STRATEGY>
+        backtest: <BACKTEST>
